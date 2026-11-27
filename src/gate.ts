@@ -29,7 +29,7 @@ export type GateOptions = {
   origin?: string
   /** Global slug, if you changed it in the plugin. */
   slug?: string
-  /** Payload's API route. Default `/api`. */
+  /** Payload's API route, as a path starting with `/`. Default `/api`. */
   apiRoute?: string
   /** Payload's admin route. Default `/admin`. */
   adminRoute?: string
@@ -105,6 +105,20 @@ function configuredOrigin(option: string | undefined, env: Record<string, string
   return { origin: '', problem: `no site address is configured. Pass the \`origin\` option or set ${ORIGIN_VAR}` }
 }
 
+type Endpoint = { url: URL; problem: null } | { url: null; problem: string }
+
+/** Where the REST read goes. It has to stay on the configured address, whatever `apiRoute` holds. */
+function switchEndpoint(site: ConfiguredOrigin, api: string, slug: string): Endpoint {
+  if (site.problem !== null) return { url: null, problem: site.problem }
+  try {
+    const url = new URL(`${site.origin}${api}/globals/${encodeURIComponent(slug)}?depth=0`)
+    if (url.origin === site.origin) return { url, problem: null }
+  } catch {
+    // Reported below. The value isn't echoed, in case it holds a password.
+  }
+  return { url: null, problem: 'the `apiRoute` option must be a path on the site that starts with /, like /api' }
+}
+
 function cookieValue(request: RequestLike, name: string): string | undefined {
   const direct = request.cookies?.get(name)?.value
   if (direct !== undefined) return direct
@@ -127,16 +141,17 @@ export function maintenanceGate(options: GateOptions = {}) {
   const ttl = (options.cacheSeconds ?? 10) * 1000
   // Fixed for the life of the gate, so every cached answer comes from this one address.
   const site = configuredOrigin(options.origin, options.env ?? process.env)
+  const endpoint = switchEndpoint(site, api, slug)
   let cached: { at: number; state: MaintenanceState | null } | null = null
   let reported: string | null = null
 
   const readRest = async (): Promise<MaintenanceState | null> => {
-    if (site.problem !== null) throw new ReadError(site.problem)
+    if (endpoint.problem !== null) throw new ReadError(endpoint.problem)
     const headers: Record<string, string> = { accept: 'application/json' }
     // Vercel Deployment Protection refuses a deployment's own requests unless they carry its automation bypass.
     const vercelBypass = (options.env ?? process.env).VERCEL_AUTOMATION_BYPASS_SECRET
     if (vercelBypass) headers['x-vercel-protection-bypass'] = vercelBypass
-    let target = new URL(`${site.origin}${api}/globals/${encodeURIComponent(slug)}?depth=0`)
+    let target = endpoint.url
     // Redirects are followed by hand, and only within the configured address.
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
       const res = await fetch(target.href, { headers, cache: 'no-store', redirect: 'manual' })
@@ -188,6 +203,9 @@ export function maintenanceGate(options: GateOptions = {}) {
       return null
     }
   }
+
+  // A setup that can't work is also logged as soon as the gate is built. A custom reader may not need an address.
+  if (!options.read && endpoint.problem !== null) report(new ReadError(endpoint.problem))
 
   return async function gate(request: RequestLike): Promise<Response | null> {
     const url = new URL(request.url)

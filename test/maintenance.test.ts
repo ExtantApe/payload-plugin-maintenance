@@ -213,6 +213,38 @@ describe('the address the gate reads from', () => {
     expect(line).toContain('SITE_MAINTENANCE=on')
   })
 
+  it('sends nothing when `apiRoute` would leave the configured address', async () => {
+    const fetchMock = stubFetch()
+    for (const apiRoute of [':4001/api', '@other.example/api', '.other.example/api', 'api', ':port/api']) {
+      logged.mockClear()
+      const gate = maintenanceGate({ origin: ORIGIN, apiRoute, env: { VERCEL_AUTOMATION_BYPASS_SECRET: SECRET } })
+      expect(await gate(from(ORIGIN))).toBeNull()
+      // No call at all, so no other address is asked and the secret goes nowhere.
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(logged).toHaveBeenCalledTimes(1)
+      const line = String(logged.mock.calls[0]![0])
+      expect(line).toContain('the `apiRoute` option must be')
+      expect(line).toContain('the site stays open')
+      expect(line).not.toContain('other.example')
+      expect(line).not.toContain(SECRET)
+    }
+  })
+
+  it('logs an unusable setup as soon as the gate is built, and only once', async () => {
+    for (const options of [{}, { origin: 'site.example' }, { origin: ORIGIN, apiRoute: '@other.example/api' }]) {
+      logged.mockClear()
+      const gate = maintenanceGate({ ...options, env: {} })
+      expect(logged).toHaveBeenCalledTimes(1)
+      expect(String(logged.mock.calls[0]![0])).toContain("can't read the maintenance switch")
+      await gate(from(ORIGIN))
+      expect(logged).toHaveBeenCalledTimes(1)
+    }
+    logged.mockClear()
+    maintenanceGate({ origin: ORIGIN, env: {} })
+    maintenanceGate({ read: reader(null), env: {} })
+    expect(logged).not.toHaveBeenCalled()
+  })
+
   it('when missing: the environment can still close the site', async () => {
     const fetchMock = stubFetch()
     const res = (await maintenanceGate({ env: { SITE_MAINTENANCE: 'on' } })(from(ORIGIN)))!

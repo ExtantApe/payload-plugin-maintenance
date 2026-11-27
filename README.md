@@ -17,7 +17,8 @@ Limits:
 
 - The switch is read over your site's REST API and reused for 10 seconds per server instance, so a change can take that long to show everywhere.
 - The gate needs to know your site's address (see [Site address](#site-address)). Without it the switch can't be read.
-- If the switch can't be read, the last answer stands; if it has never been read, the site stays open. Maintenance is a courtesy page, not a security control, so an API outage shouldn't close the site. The gate writes the reason to the server log (`console.error`), once per reason until a read works again.
+- **Don't use maintenance mode to hide content that is unsafe for children.** Unpublish that content. The API stays open, signed-in people still see the site, and the site stays open when the switch has never been read.
+- If the switch can't be read, the last answer stands; if it has never been read, the site stays open. Maintenance is a courtesy page, not a security control, so an API outage shouldn't close the site. The gate writes the reason to the server log (`console.error`), once per reason until a read works again. A missing or invalid address or `apiRoute` is also logged when the gate is built, which is when your proxy module loads.
 - One switch per deployment. A multi-tenant site closes every tenant together.
 - On Vercel with Deployment Protection, the gate's request to its own API is refused unless "Protection Bypass for Automation" is on; the gate sends `VERCEL_AUTOMATION_BYPASS_SECRET` when it exists.
 
@@ -71,11 +72,25 @@ The gate reads the switch from the address you configure. It takes the first of 
 
 **Self-hosted sites must set 1 or 2.** On Vercel you need to set one only if the system variables aren't exposed, or if the address Vercel gives redirects to another one (for example `example.com` to `www.example.com`). In that case use the address that answers directly.
 
-Write it as scheme and host, with a port if needed: `https://www.example.com` or `http://127.0.0.1:3000`. A path, query or sign-in details make it invalid; a base path goes in `apiRoute`. It can be an internal address, as long as your proxy can reach the API there. Use `https` unless the request stays on a network you trust. If you run several environments, give each its own address, so each reads its own switch.
+Write it as scheme and host, with a port if needed: `https://www.example.com` or `http://127.0.0.1:3000`. A path, query or sign-in details make it invalid; a base path goes in `apiRoute`, which must start with `/` (for example `/shop/api`). It can be an internal address, as long as your proxy can reach the API there. Use `https` unless the request stays on a network you trust. If you run several environments, give each its own address, so each reads its own switch.
 
 The gate follows up to 3 redirects that stay on that address. It doesn't follow a redirect to another one, including `http` to `https`.
 
-**If the address is missing or invalid,** the gate can't read the switch. The site **stays open, even if "Close the site" is ticked**, and the server log says why. An invalid value isn't replaced by the next one in the list. `SITE_MAINTENANCE=on` still closes the site, with the default words. After upgrading or changing the address, tick "Close the site" once and check that a signed-out visitor sees the page.
+**If the address is missing or invalid,** the gate can't read the switch. The site **stays open, even if "Close the site" is ticked**, and the server log says why. An invalid value isn't replaced by the next one in the list. An `apiRoute` that would send the request anywhere other than that address is treated the same way, and nothing is sent. `SITE_MAINTENANCE=on` still closes the site, with the default words. After upgrading or changing the address, tick "Close the site" once and check that a signed-out visitor sees the page.
+
+## Upgrading from 0.2.0
+
+0.3.0 has a **breaking change**: the gate reads the switch only from a configured [site address](#site-address). Check each of these before you upgrade:
+
+- **Self-hosted:** pass `origin` or set `SITE_MAINTENANCE_ORIGIN`. Use the scheme, host and optional port, with no path. A base path goes in `apiRoute`. Until this is set, the site is **open to signed-out visitors, even if "Close the site" is already ticked**.
+- **Vercel, system environment variables not exposed:** expose them to deployments, or set `SITE_MAINTENANCE_ORIGIN`.
+- **Vercel, production domain redirects** (for example `example.com` to `www.example.com`, or to another domain): set `SITE_MAINTENANCE_ORIGIN` to the address that answers directly.
+- **An API that redirects to another host, port or scheme** (including `http` to `https`): configure the final address.
+- **A custom `read` that used its argument:** it now gets the configured address, or an empty string if there is none.
+- **Several environments that share one env file:** give each its own address.
+- **After upgrading:** tick "Close the site" once and check that a signed-out visitor sees the page.
+
+If the site has to stay closed while you upgrade, set `SITE_MAINTENANCE=on` until that check is done. While it's set, the page shows whether or not the switch can be read, so unset it before the check.
 
 ## Access
 
