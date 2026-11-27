@@ -2,6 +2,12 @@
 
 Newest first.
 
+## 2026-11-26: 14-day check
+
+- Changes since 2026-11-11: the 0.2.0 release (4988c3a), EXTANT APE named in the LICENSE (7d6c8ab), the move to `@extantape` (6c0e643, which changes one package name in a doc comment in `src/index.ts`), and two docs edits (6ade67b, ba1fd25). Nothing in `test/` changed.
+- Behavior unchanged; the suite passes (12 tests), and so does the typecheck.
+- Gaps: none new.
+
 ## 2026-11-11: the default closes to admin users only
 
 Suite: 11 tests before, 12 after (`npx vitest run`, unit tests with fake requests; no Payload instance).
