@@ -2,6 +2,25 @@
 
 Newest first.
 
+## 2026-11-27: the configured site address
+
+Suite: 12 tests before, 24 after (`npm test`, run twice). Run against the 0.2.0 `src/gate.ts`, 11 of the 12 new tests fail; the same-address redirect test passes on both, and guards against losing that. The `apiRoute` and startup-log tests also fail against the first version of this change, before those two checks were added.
+
+| Promise | Tests ("the address the gate reads from") |
+| --- | --- |
+| Only the configured address is read, with one cached answer, whatever the request names | "is the configured one…" |
+| Order: option, `SITE_MAINTENANCE_ORIGIN`, Vercel values (production and elsewhere); Vercel names ignored off Vercel | "comes from the option…" |
+| An `apiRoute` that would leave the configured address: nothing is requested, so the Vercel secret isn't sent; the log leaves the value out | "sends nothing when `apiRoute`…" (stand-in `fetch`) |
+| An unusable address or `apiRoute` is logged when the gate is built, once; a usable setup or a custom reader logs nothing then | "logs an unusable setup…" |
+| Missing address: no request, site open, reason logged once; the environment can still close it | the two "when missing…" tests |
+| Invalid address: reported without echoing it, no fallback | "when unusable…" |
+| A custom reader gets the configured address or an empty string | "is what your own reader gets…" |
+| Logs leave out other errors' messages and the Vercel secret; a new failure after a good read is logged again | "logs a failed read…" |
+| Redirects to another address aren't followed; same-address ones are; loops stop | the three "redirects…" tests (real servers on 127.0.0.1, closed after each) |
+
+- The earlier REST test now passes `origin`.
+- Gaps skipped: a real Next.js proxy (Node and Edge runtimes handle `fetch` redirects and `process.env` themselves, and decide when the proxy module loads and so when the startup line appears), and the real values Vercel sets. Both need a running install.
+
 ## 2026-11-26: 14-day check
 
 - Changes since 2026-11-11: the 0.2.0 release (4988c3a), EXTANT APE named in the LICENSE (7d6c8ab), the move to `@extantape` (6c0e643, which changes one package name in a doc comment in `src/index.ts`), and two docs edits (6ade67b, ba1fd25). Nothing in `test/` changed.

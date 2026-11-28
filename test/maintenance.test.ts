@@ -1,4 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { maintenance, maintenanceGlobal, renderPage } from '../src/index.js'
 import { envOverride, maintenanceGate, type MaintenanceState } from '../src/gate.js'
@@ -138,7 +141,7 @@ describe('the gate', () => {
     const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify({ enabled: true }), { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
     try {
-      const gate = maintenanceGate({ env: { VERCEL_AUTOMATION_BYPASS_SECRET: 's3cret' } })
+      const gate = maintenanceGate({ origin: ORIGIN, env: { VERCEL_AUTOMATION_BYPASS_SECRET: 's3cret' } })
       expect((await gate(req('/x')))!.status).toBe(503)
       const [url, init] = fetchMock.mock.calls[0]!
       expect(url).toBe(`${ORIGIN}/api/globals/maintenance?depth=0`)
@@ -146,5 +149,201 @@ describe('the gate', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('the address the gate reads from', () => {
+  const SECRET = 'made-up-secret'
+  const OTHER = 'https://other.example'
+  const from = (origin: string) => ({ url: `${origin}/`, headers: new Headers({ host: new URL(origin).host, 'x-forwarded-host': new URL(origin).host }) })
+  const answer = (enabled: boolean) => new Response(JSON.stringify({ enabled }), { status: 200 })
+  const stubFetch = (respond: () => Response = () => answer(true)) => {
+    const mock = vi.fn(async (_url: string, _init?: RequestInit) => respond())
+    vi.stubGlobal('fetch', mock)
+    return mock
+  }
+  let logged: ReturnType<typeof vi.fn<(...args: unknown[]) => void>>
+  beforeEach(() => {
+    logged = vi.fn<(...args: unknown[]) => void>()
+    vi.spyOn(console, 'error').mockImplementation(logged)
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  const askedFor = async (options: Parameters<typeof maintenanceGate>[0]) => {
+    const fetchMock = stubFetch()
+    await maintenanceGate(options)(from(OTHER))
+    return fetchMock.mock.calls.map(([url]) => new URL(url).origin)
+  }
+
+  it('is the configured one, whatever address the request names, with one cached answer', async () => {
+    const fetchMock = stubFetch()
+    const gate = maintenanceGate({ origin: `${ORIGIN}/`, env: { VERCEL_AUTOMATION_BYPASS_SECRET: SECRET } })
+    expect((await gate(from(OTHER)))!.status).toBe(503)
+    expect((await gate(from(ORIGIN)))!.status).toBe(503)
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([`${ORIGIN}/api/globals/maintenance?depth=0`])
+  })
+
+  it('comes from the option, then SITE_MAINTENANCE_ORIGIN, then the Vercel system values', async () => {
+    const vercel = { VERCEL: '1', VERCEL_URL: 'deploy.example', VERCEL_PROJECT_PRODUCTION_URL: 'prod.example' }
+    const env = { ...vercel, VERCEL_ENV: 'production', SITE_MAINTENANCE_ORIGIN: 'http://internal.example:3000' }
+    expect(await askedFor({ origin: ORIGIN, env })).toEqual([ORIGIN])
+    expect(await askedFor({ env })).toEqual(['http://internal.example:3000'])
+    expect(await askedFor({ origin: '', env })).toEqual(['http://internal.example:3000'])
+    expect(await askedFor({ env: { ...vercel, VERCEL_ENV: 'production' } })).toEqual(['https://prod.example'])
+    expect(await askedFor({ env: { ...vercel, VERCEL_ENV: 'preview' } })).toEqual(['https://deploy.example'])
+    expect(await askedFor({ env: { VERCEL: '1', VERCEL_ENV: 'production', VERCEL_URL: 'deploy.example' } })).toEqual(['https://deploy.example'])
+    // Vercel's names count only on Vercel.
+    expect(await askedFor({ env: { VERCEL_URL: 'deploy.example' } })).toEqual([])
+  })
+
+  it('when missing: sends nothing, leaves the site open and says why once', async () => {
+    const fetchMock = stubFetch()
+    const gate = maintenanceGate({ env: { VERCEL_AUTOMATION_BYPASS_SECRET: SECRET } })
+    expect(await gate(from(ORIGIN))).toBeNull()
+    expect(await gate(from(OTHER))).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(logged).toHaveBeenCalledTimes(1)
+    const line = String(logged.mock.calls[0]![0])
+    expect(line).toContain('no site address is configured')
+    expect(line).toContain('SITE_MAINTENANCE_ORIGIN')
+    expect(line).toContain('the site stays open')
+    expect(line).toContain('SITE_MAINTENANCE=on')
+  })
+
+  it('sends nothing when `apiRoute` would leave the configured address', async () => {
+    const fetchMock = stubFetch()
+    for (const apiRoute of [':4001/api', '@other.example/api', '.other.example/api', 'api', ':port/api']) {
+      logged.mockClear()
+      const gate = maintenanceGate({ origin: ORIGIN, apiRoute, env: { VERCEL_AUTOMATION_BYPASS_SECRET: SECRET } })
+      expect(await gate(from(ORIGIN))).toBeNull()
+      // No call at all, so no other address is asked and the secret goes nowhere.
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(logged).toHaveBeenCalledTimes(1)
+      const line = String(logged.mock.calls[0]![0])
+      expect(line).toContain('the `apiRoute` option must be')
+      expect(line).toContain('the site stays open')
+      expect(line).not.toContain('other.example')
+      expect(line).not.toContain(SECRET)
+    }
+  })
+
+  it('logs an unusable setup as soon as the gate is built, and only once', async () => {
+    for (const options of [{}, { origin: 'site.example' }, { origin: ORIGIN, apiRoute: '@other.example/api' }]) {
+      logged.mockClear()
+      const gate = maintenanceGate({ ...options, env: {} })
+      expect(logged).toHaveBeenCalledTimes(1)
+      expect(String(logged.mock.calls[0]![0])).toContain("can't read the maintenance switch")
+      await gate(from(ORIGIN))
+      expect(logged).toHaveBeenCalledTimes(1)
+    }
+    logged.mockClear()
+    maintenanceGate({ origin: ORIGIN, env: {} })
+    maintenanceGate({ read: reader(null), env: {} })
+    expect(logged).not.toHaveBeenCalled()
+  })
+
+  it('when missing: the environment can still close the site', async () => {
+    const fetchMock = stubFetch()
+    const res = (await maintenanceGate({ env: { SITE_MAINTENANCE: 'on' } })(from(ORIGIN)))!
+    expect(res.status).toBe(503)
+    expect(await res.text()).toContain('getting things ready')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('when unusable: is reported without echoing it, and no other source stands in', async () => {
+    for (const bad of ['site.example', 'ftp://site.example', `${ORIGIN}/shop`, `${ORIGIN}?a=1`, 'https://name:hunter2@site.example']) {
+      logged.mockClear()
+      expect(await askedFor({ origin: bad, env: { SITE_MAINTENANCE_ORIGIN: ORIGIN } })).toEqual([])
+      expect(logged).toHaveBeenCalledTimes(1)
+      expect(String(logged.mock.calls[0]![0])).toContain('the `origin` option must be')
+      expect(String(logged.mock.calls[0]![0])).not.toContain('hunter2')
+    }
+  })
+
+  it('is what your own reader gets, or an empty string, and the reader still works without one', async () => {
+    const read = reader({ enabled: true })
+    expect((await maintenanceGate({ read, origin: ORIGIN, env: {} })(from(OTHER)))!.status).toBe(503)
+    expect((await maintenanceGate({ read, env: {} })(from(OTHER)))!.status).toBe(503)
+    expect(read.mock.calls).toEqual([[ORIGIN], ['']])
+    expect(logged).not.toHaveBeenCalled()
+  })
+
+  it('logs a failed read without the other error\u2019s words, and again only after a read has worked', async () => {
+    vi.useFakeTimers()
+    let fail = true
+    stubFetch(() => {
+      if (fail) throw new TypeError(`invalid header value "${SECRET}"`)
+      return answer(true)
+    })
+    const gate = maintenanceGate({ origin: ORIGIN, env: { VERCEL_AUTOMATION_BYPASS_SECRET: SECRET } })
+    await gate(from(ORIGIN))
+    await gate(from(ORIGIN))
+    expect(logged).toHaveBeenCalledTimes(1)
+    fail = false
+    expect((await gate(from(ORIGIN)))!.status).toBe(503)
+    fail = true
+    vi.advanceTimersByTime(11_000)
+    expect((await gate(from(ORIGIN)))!.status).toBe(503)
+    expect(logged).toHaveBeenCalledTimes(2)
+    expect(String(logged.mock.calls[1]![0])).toContain('The last answer stands.')
+    expect(JSON.stringify(logged.mock.calls)).not.toContain(SECRET)
+  })
+
+  describe('redirects, with real servers on 127.0.0.1', () => {
+    const servers: Server[] = []
+    const listen = async (handle: (req: IncomingMessage, res: ServerResponse) => void) => {
+      const server = createServer(handle)
+      servers.push(server)
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+      return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    }
+    afterEach(async () => {
+      for (const server of servers.splice(0)) {
+        server.closeAllConnections()
+        await new Promise((resolve) => server.close(resolve))
+      }
+    })
+    const env = { VERCEL_AUTOMATION_BYPASS_SECRET: SECRET }
+
+    it('never follows one to another address', async () => {
+      let elsewhereHits = 0
+      const elsewhere = await listen((_req, res) => {
+        elsewhereHits++
+        res.end(JSON.stringify({ enabled: true }))
+      })
+      const site = await listen((_req, res) => res.writeHead(307, { location: `${elsewhere}/moved` }).end())
+      expect(await maintenanceGate({ origin: site, env })(from(site))).toBeNull()
+      expect(elsewhereHits).toBe(0)
+      expect(String(logged.mock.calls[0]![0])).toContain(`redirects to ${elsewhere}`)
+      expect(JSON.stringify(logged.mock.calls)).not.toContain(SECRET)
+    })
+
+    it('follows one that stays on the configured address', async () => {
+      const seen: Array<[string, unknown]> = []
+      const site = await listen((req, res) => {
+        seen.push([req.url!, req.headers['x-vercel-protection-bypass']])
+        if (req.url!.startsWith('/api/globals/maintenance?')) res.writeHead(308, { location: '/api/globals/maintenance/?depth=0' }).end()
+        else res.end(JSON.stringify({ enabled: true }))
+      })
+      expect((await maintenanceGate({ origin: site, env })(from(site)))!.status).toBe(503)
+      expect(seen).toEqual([
+        ['/api/globals/maintenance?depth=0', SECRET],
+        ['/api/globals/maintenance/?depth=0', SECRET],
+      ])
+    })
+
+    it('gives up on a loop', async () => {
+      let hits = 0
+      const site = await listen((req, res) => {
+        hits++
+        res.writeHead(302, { location: req.url! }).end()
+      })
+      expect(await maintenanceGate({ origin: site, env })(from(site))).toBeNull()
+      expect(hits).toBe(4)
+      expect(String(logged.mock.calls[0]![0])).toContain('redirected more than 3 times')
+    })
   })
 })

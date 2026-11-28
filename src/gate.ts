@@ -13,15 +13,25 @@ import { renderPage, type PageContent, type PageTheme } from './page.js'
  *     ...
  *   }
  *
+ * The REST read goes to the site's configured address: the `origin` option, the
+ * SITE_MAINTENANCE_ORIGIN environment variable, or on Vercel the address in
+ * Vercel's system environment variables.
+ *
  * Your proxy's matcher must skip the admin and the API (the gate also skips
  * them itself, so it can never call itself in a loop).
  */
 export type GateOptions = {
+  /**
+   * The address the gate reads the switch from: scheme, host and optional port, for example `https://www.example.com`.
+   * Default: the `SITE_MAINTENANCE_ORIGIN` environment variable, then on Vercel the project's production domain
+   * (in production) or the deployment's own address (elsewhere, and in production when the production domain is absent).
+   */
+  origin?: string
   /** Global slug, if you changed it in the plugin. */
   slug?: string
-  /** Payload's API route. Default `/api`. */
+  /** Payload's API route, as a path starting with `/`. Default `/api`. */
   apiRoute?: string
-  /** Payload's admin route. Default `/admin`. */
+  /** Payload's admin route. Default `/admin`. `''` or `'/'` opens every path, so the gate never closes the site. */
   adminRoute?: string
   /** Paths that always stay open, by prefix (for example `/healthz`). The admin and API always do. */
   openPaths?: string[]
@@ -37,9 +47,9 @@ export type GateOptions = {
   brand?: string
   lang?: string
   theme?: PageTheme
-  /** Your own reader of the switch instead of the REST call (for tests, or a different store). */
+  /** Your own reader of the switch instead of the REST call (for tests, or a different store). It gets the configured address, or an empty string if there is none. */
   read?: (origin: string) => Promise<MaintenanceState | null>
-  /** Environment to read the override from. Default `process.env`. */
+  /** Environment to read the override, the address and the Vercel values from. Default `process.env`. */
   env?: Record<string, string | undefined>
 }
 
@@ -59,6 +69,54 @@ const OFF = new Set(['off', 'false', '0', 'no'])
 export function envOverride(value: string | undefined): boolean | null {
   const v = (value ?? '').trim().toLowerCase()
   return ON.has(v) ? true : OFF.has(v) ? false : null
+}
+
+const ORIGIN_VAR = 'SITE_MAINTENANCE_ORIGIN'
+const MAX_REDIRECTS = 3
+const LOG_PREFIX = 'payload-plugin-maintenance:'
+
+/** A failed read whose message is written here, so it's safe to log. */
+class ReadError extends Error {}
+
+type ConfiguredOrigin = { origin: string; problem: null } | { origin: ''; problem: string }
+
+function parseOrigin(value: string, source: string): ConfiguredOrigin {
+  try {
+    const url = new URL(value)
+    const bare = url.pathname === '/' && !url.search && !url.hash && !url.username && !url.password
+    if (bare && (url.protocol === 'https:' || url.protocol === 'http:')) return { origin: url.origin, problem: null }
+  } catch {
+    // Reported below. The value isn't echoed, in case it holds a password.
+  }
+  return { origin: '', problem: `${source} must be an http or https address with no path, query or sign-in details, like https://www.example.com` }
+}
+
+/** The site's address as the host configured it. A value that is set but unusable is reported, never replaced by a later source. */
+function configuredOrigin(option: string | undefined, env: Record<string, string | undefined>): ConfiguredOrigin {
+  if (option?.trim()) return parseOrigin(option.trim(), 'the `origin` option')
+  const fromEnv = env[ORIGIN_VAR]?.trim()
+  if (fromEnv) return parseOrigin(fromEnv, ORIGIN_VAR)
+  if (env.VERCEL === '1') {
+    // In production, the production domain: Vercel's Standard Protection leaves it reachable. Elsewhere, this deployment.
+    const name = env.VERCEL_ENV === 'production' && env.VERCEL_PROJECT_PRODUCTION_URL ? 'VERCEL_PROJECT_PRODUCTION_URL' : 'VERCEL_URL'
+    const host = env[name]?.trim()
+    if (host) return parseOrigin(`https://${host}`, name)
+  }
+  return { origin: '', problem: `no site address is configured. Pass the \`origin\` option or set ${ORIGIN_VAR}` }
+}
+
+type Endpoint = { url: URL; problem: null } | { url: null; problem: string }
+
+/** Where the REST read goes. It has to stay on the configured address, whatever `apiRoute` holds. */
+function switchEndpoint(site: ConfiguredOrigin, api: string, slug: string): Endpoint {
+  if (site.problem !== null) return { url: null, problem: site.problem }
+  try {
+    const url = new URL(`${site.origin}${api}/globals/${encodeURIComponent(slug)}?depth=0`)
+    if (url.origin === site.origin) return { url, problem: null }
+  } catch {
+    // Reported below. The value isn't echoed, in case it holds a password.
+  }
+  return { url: null, problem: 'the `apiRoute` option must be a path on the site that starts with /, like /api' }
 }
 
 function cookieValue(request: RequestLike, name: string): string | undefined {
@@ -81,16 +139,47 @@ export function maintenanceGate(options: GateOptions = {}) {
   const envVar = options.envVar === undefined ? 'SITE_MAINTENANCE' : options.envVar
   const bypass = options.bypassCookie === undefined ? 'payload-token' : options.bypassCookie
   const ttl = (options.cacheSeconds ?? 10) * 1000
+  // Fixed for the life of the gate, so every cached answer comes from this one address.
+  const site = configuredOrigin(options.origin, options.env ?? process.env)
+  const endpoint = switchEndpoint(site, api, slug)
   let cached: { at: number; state: MaintenanceState | null } | null = null
+  let reported: string | null = null
 
-  const readRest = async (origin: string): Promise<MaintenanceState | null> => {
+  const readRest = async (): Promise<MaintenanceState | null> => {
+    if (endpoint.problem !== null) throw new ReadError(endpoint.problem)
     const headers: Record<string, string> = { accept: 'application/json' }
     // Vercel Deployment Protection refuses a deployment's own requests unless they carry its automation bypass.
     const vercelBypass = (options.env ?? process.env).VERCEL_AUTOMATION_BYPASS_SECRET
     if (vercelBypass) headers['x-vercel-protection-bypass'] = vercelBypass
-    const res = await fetch(`${origin}${api}/globals/${encodeURIComponent(slug)}?depth=0`, { headers, cache: 'no-store' })
-    if (!res.ok) throw new Error(`maintenance switch: HTTP ${res.status}`)
-    return (await res.json()) as MaintenanceState
+    let target = endpoint.url
+    // Redirects are followed by hand, and only within the configured address.
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const res = await fetch(target.href, { headers, cache: 'no-store', redirect: 'manual' })
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get('location') : null
+      if (location === null) {
+        if (!res.ok) throw new ReadError(`the request to ${site.origin} answered HTTP ${res.status}`)
+        return (await res.json()) as MaintenanceState
+      }
+      const next = new URL(location, target)
+      if (next.origin !== site.origin) {
+        throw new ReadError(`${site.origin} redirects to ${next.origin}, which the gate doesn't follow. If that is your site, configure it as the address`)
+      }
+      target = next
+    }
+    throw new ReadError(`${site.origin} redirected more than ${MAX_REDIRECTS} times`)
+  }
+
+  /** Says why the switch couldn't be read, once per reason until a read works again. */
+  function report(error: unknown) {
+    // Other errors' messages aren't logged: they can quote header values or connection strings.
+    const reason = error instanceof ReadError ? error.message : 'the request or reader failed'
+    const outcome = cached?.state
+      ? 'The last answer stands.'
+      : `With no answer, the site stays open even if "Close the site" is ticked${envVar ? `, unless ${envVar}=on` : ''}.`
+    const line = `${LOG_PREFIX} can't read the maintenance switch: ${reason}. ${outcome}`
+    if (line === reported) return
+    reported = line
+    console.error(line)
   }
 
   /**
@@ -98,13 +187,15 @@ export function maintenanceGate(options: GateOptions = {}) {
    * stands; with none yet, the site stays open (maintenance is a courtesy page,
    * not a security control, so an outage of the API shouldn't close the site).
    */
-  async function state(origin: string): Promise<MaintenanceState | null> {
+  async function state(): Promise<MaintenanceState | null> {
     if (cached && Date.now() - cached.at < ttl) return cached.state
     try {
-      const s = await (options.read ?? readRest)(origin)
+      const s = await (options.read ? options.read(site.origin) : readRest())
       cached = { at: Date.now(), state: s }
+      reported = null
       return s
-    } catch {
+    } catch (error) {
+      report(error)
       if (cached) {
         cached = { at: Date.now(), state: cached.state }
         return cached.state
@@ -113,13 +204,16 @@ export function maintenanceGate(options: GateOptions = {}) {
     }
   }
 
+  // A setup that can't work is also logged as soon as the gate is built. A custom reader may not need an address.
+  if (!options.read && endpoint.problem !== null) report(new ReadError(endpoint.problem))
+
   return async function gate(request: RequestLike): Promise<Response | null> {
     const url = new URL(request.url)
     if (open.some((p) => url.pathname === p || url.pathname.startsWith(`${p}/`))) return null
     const forced = envVar ? envOverride((options.env ?? process.env)[envVar]) : null
     if (forced === false) return null
     if (bypass && cookieValue(request, bypass)) return null
-    const s = forced === true ? await state(url.origin).then((x) => x ?? {}) : await state(url.origin)
+    const s = forced === true ? await state().then((x) => x ?? {}) : await state()
     if (forced !== true && !s?.enabled) return null
     const html = renderPage({ brand: options.brand, lang: options.lang, heading: s?.heading, message: s?.message, backAround: s?.backAround }, options.theme)
     return new Response(request.method === 'HEAD' ? null : html, {
