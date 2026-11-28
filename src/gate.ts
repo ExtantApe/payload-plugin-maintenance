@@ -24,14 +24,14 @@ export type GateOptions = {
   /**
    * The address the gate reads the switch from: scheme, host and optional port, for example `https://www.example.com`.
    * Default: the `SITE_MAINTENANCE_ORIGIN` environment variable, then on Vercel the project's production domain
-   * (in production) or the deployment's own address (elsewhere).
+   * (in production) or the deployment's own address (elsewhere, and in production when the production domain is absent).
    */
   origin?: string
   /** Global slug, if you changed it in the plugin. */
   slug?: string
   /** Payload's API route, as a path starting with `/`. Default `/api`. */
   apiRoute?: string
-  /** Payload's admin route. Default `/admin`. */
+  /** Payload's admin route. Default `/admin`. `''` or `'/'` opens every path, so the gate never closes the site. */
   adminRoute?: string
   /** Paths that always stay open, by prefix (for example `/healthz`). The admin and API always do. */
   openPaths?: string[]

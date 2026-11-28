@@ -2,7 +2,7 @@
 
 Maintenance mode for Payload: close a site with a back-soon page and HTTP 503 from an admin switch, while the admin, API and signed-in staff keep working.
 
-**Status:** early (0.2.0). From 0.2.0 it is published as `@extantape/payload-plugin-maintenance`; the earlier package name is deprecated in its favor. Unit tests cover the page, the global's access and the gate (switch, environment override, sign-in bypass, cache, failed reads, the Vercel protection header, the configured site address and redirects). The Vercel address defaults are tested with made-up values only, not on a Vercel deployment. The same approach already runs on a live site as a hand-written switch; this package hasn't been installed in a real site yet.
+**Status:** early (0.3.0). From 0.2.0 it is published as `@extantape/payload-plugin-maintenance`; the earlier package name is deprecated in its favor. Unit tests cover the page, the global's access and the gate (switch, environment override, sign-in bypass, cache, failed reads, the Vercel protection header, the configured site address and redirects). The Vercel address defaults are tested with made-up values only, not on a Vercel deployment. The same approach already runs on a live site as a hand-written switch; this package hasn't been installed in a real site yet.
 
 ## What it does
 
@@ -68,11 +68,11 @@ The gate reads the switch from the address you configure. It takes the first of 
 
 1. The `origin` option, for example `maintenanceGate({ origin: 'https://www.example.com' })`.
 2. The `SITE_MAINTENANCE_ORIGIN` environment variable.
-3. On Vercel, from [Vercel's system environment variables](https://vercel.com/docs/environment-variables/system-environment-variables): `VERCEL_PROJECT_PRODUCTION_URL` in production, `VERCEL_URL` in previews and other deployments. The project has to expose them to deployments.
+3. On Vercel, from [Vercel's system environment variables](https://vercel.com/docs/environment-variables/system-environment-variables): `VERCEL_PROJECT_PRODUCTION_URL` in production, `VERCEL_URL` in previews and other deployments. Production also uses `VERCEL_URL` when `VERCEL_PROJECT_PRODUCTION_URL` is absent. The project has to expose them to deployments.
 
 **Self-hosted sites must set 1 or 2.** On Vercel you need to set one only if the system variables aren't exposed, or if the address Vercel gives redirects to another one (for example `example.com` to `www.example.com`). In that case use the address that answers directly.
 
-Write it as scheme and host, with a port if needed: `https://www.example.com` or `http://127.0.0.1:3000`. A path, query or sign-in details make it invalid; a base path goes in `apiRoute`. Write `apiRoute` with a leading `/` (for example `/shop/api`). The gate doesn't check for the slash itself. It checks that the resulting request stays on the configured address. **Don't set `apiRoute` to `''` or `'/'`.** Either one opens every path, so the gate never closes the site, even with `SITE_MAINTENANCE=on`, and it logs no warning about this.
+Write it as scheme and host, with a port if needed: `https://www.example.com` or `http://127.0.0.1:3000`. A path, query or sign-in details make it invalid; a base path goes in `apiRoute`. Write `apiRoute` with a leading `/` (for example `/shop/api`). The gate doesn't check for the slash itself. It checks that the resulting request stays on the configured address. **Don't set `apiRoute` or `adminRoute` to `''` or `'/'`.** Any of these opens every path, so the gate never closes the site, even with `SITE_MAINTENANCE=on`, and it logs no warning about this.
 
 The address can be internal, as long as your proxy can reach the API there. Use `https` unless the request stays on a network you trust. If you run several environments, give each its own address, so each reads its own switch.
 
