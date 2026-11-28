@@ -6,7 +6,7 @@
   - **Self-hosted sites must set `origin` or `SITE_MAINTENANCE_ORIGIN`** to the site's address, for example `https://www.example.com`. Until then the site stays open even if "Close the site" is ticked, and the server log says why. `SITE_MAINTENANCE=on` still closes it.
   - **Vercel sites** need no change if system environment variables are exposed to deployments and that address answers without redirecting to another one. Otherwise, set `SITE_MAINTENANCE_ORIGIN` to the address that answers directly.
   - See "Upgrading from 0.2.0" in the README for every change a site may need.
-- The request for the switch is sent only to the configured address. An `apiRoute` that would lead elsewhere (one that doesn't start with `/`, for example) is treated as invalid configuration.
+- The request for the switch is sent only to the configured address. An `apiRoute` that would lead elsewhere (`api` in place of `/api`, for example) is treated as invalid configuration.
 - A missing or invalid address or `apiRoute` is also logged when the gate is built.
 - Redirects are followed only when they stay on the configured address, up to 3.
 - The gate logs why it can't read the switch, once per reason until a read works again.

@@ -72,7 +72,9 @@ The gate reads the switch from the address you configure. It takes the first of 
 
 **Self-hosted sites must set 1 or 2.** On Vercel you need to set one only if the system variables aren't exposed, or if the address Vercel gives redirects to another one (for example `example.com` to `www.example.com`). In that case use the address that answers directly.
 
-Write it as scheme and host, with a port if needed: `https://www.example.com` or `http://127.0.0.1:3000`. A path, query or sign-in details make it invalid; a base path goes in `apiRoute`, which must start with `/` (for example `/shop/api`). It can be an internal address, as long as your proxy can reach the API there. Use `https` unless the request stays on a network you trust. If you run several environments, give each its own address, so each reads its own switch.
+Write it as scheme and host, with a port if needed: `https://www.example.com` or `http://127.0.0.1:3000`. A path, query or sign-in details make it invalid; a base path goes in `apiRoute`. Write `apiRoute` with a leading `/` (for example `/shop/api`). The gate doesn't check for the slash itself. It checks that the resulting request stays on the configured address. **Don't set `apiRoute` to `''` or `'/'`.** Either one opens every path, so the gate never closes the site, even with `SITE_MAINTENANCE=on`, and it logs no warning about this.
+
+The address can be internal, as long as your proxy can reach the API there. Use `https` unless the request stays on a network you trust. If you run several environments, give each its own address, so each reads its own switch.
 
 The gate follows up to 3 redirects that stay on that address. It doesn't follow a redirect to another one, including `http` to `https`.
 
@@ -98,7 +100,7 @@ If the site has to stay closed while you upgrade, set `SITE_MAINTENANCE=on` unti
 
 With no `access`, only users of your admin collection (`admin.user` in your Payload config, usually `users`) can change it. Anyone signed in through another auth collection, such as site members, is refused, and so is everyone if the config names no admin collection. Reading the global stays open to anyone: it holds nothing private.
 
-**Changed 2026-11-11 (unreleased):** the default used to let any signed-in account change the switch, members of other auth collections included. Sites relying on the old default must pass the option, for example `access: ({ req }) => Boolean(req.user)`.
+**Changed in 0.2.0 (2026-11-11):** the default used to let any signed-in account change the switch, members of other auth collections included. Sites relying on the old default must pass the option, for example `access: ({ req }) => Boolean(req.user)`.
 
 Gate options: `origin`, `slug`, `apiRoute`, `adminRoute`, `openPaths`, `envVar`, `bypassCookie`, `cacheSeconds`, `retryAfterSeconds`, `brand`, `lang`, `theme` (light and dark colours), and `read` to supply your own reader. Your reader gets the configured address, or an empty string if there is none.
 
